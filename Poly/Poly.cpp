@@ -11,7 +11,9 @@
 // Other includes
 #include <iostream>
 #include <vector>
-#include <random> 
+#include <random>
+#include <numeric>
+#include <sstream>
 
 #include "types/vec2.h"
 
@@ -24,7 +26,7 @@ namespace vars {
     int v_recurs = 2;
     int v_delta = 2;
 
-    int v_n = 50;
+    int v_n = 25;
 
     int v_gen_type = 1; // 0 - normal, 1 - uniform
 
@@ -38,6 +40,25 @@ namespace vars {
     }
 }
 
+namespace plots {
+    std::vector<float> pl_x;
+    std::vector<float> pl_max;
+    std::vector<float> pl_mean;
+    std::vector<float> pl_elong;
+
+    std::vector<float> pl3_log2elong;
+    std::vector<int> pl3_x;
+
+    float ar_x[ 256 ] = {};
+    float ar_max[ 256 ] = {};
+    float ar_mean[ 256 ] = {};
+    float ar_elong[ 256 ] = {};
+    float ar_log2elong[ 256 ] = {};
+
+    float ar3_log2elong[ 256 ] = {};
+    float ar3_x[ 256 ] = {};
+}
+
 // Data
 static LPDIRECT3D9              g_pD3D = NULL;
 static LPDIRECT3DDEVICE9        g_pd3dDevice = NULL;
@@ -49,51 +70,96 @@ void CleanupDeviceD3D( );
 void ResetDevice( );
 LRESULT WINAPI WndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 
-/*
-ImVector<ImVec2> FPLrec( ImVector<ImVec2> _points, ImVec2 _vec, int _r, int _delta, float _mean, float _stand_dev, int _gen_type, float _s) {
-    ImVector<ImVec2> points;
+void clear_plots( ) {
+    // Clears plots stuff
+    plots::pl_x.clear( );
+    plots::pl_max.clear( );
+    plots::pl_mean.clear( );
+    plots::pl_elong.clear( );
 
-    auto p = _points;
-    //auto r = _r;
+    plots::pl3_log2elong.clear( );
+    plots::pl3_x.clear( );
 
-    auto vec_b = _vec;
-    auto vec_a = p.back( );
+    for ( int i = 0; i < 256; ++i ) {
+        plots::ar_x[ i ] = 0.f;
+        plots::ar_max[ i ] = 0.f;
+        plots::ar_mean[ i ] = 0.f;
+        plots::ar_elong[ i ] = 0.f;
+        plots::ar_log2elong[ i ] = 0.f;
 
-    ImVec2 buff_v( vec_b.x - vec_a.x, vec_b.y - vec_a.y );
-    //buff_v = NormalizeVec( buff_v.x, buff_v.y );
-
-    auto V = VecLength( buff_v.x, buff_v.y );
-
-    if ( _r == 0 || std::fabsf( V ) < _delta ) {
-        p.push_back( vec_b );
-
-        return p;
+        plots::ar3_log2elong[ i ] = 0.f;
+        plots::ar3_x[ i ] = 0.f;
     }
-
-    std::random_device rd {};
-    std::mt19937 gen { rd( ) };
-    float rf = 0.f; //dis( gen );
-
-    if ( _gen_type == 0 ) {
-        std::normal_distribution<float> dis( _mean, _stand_dev );
-        rf = dis( gen );
-    }
-    else {
-        std::uniform_real_distribution<> dis( -_s, _s );
-        rf = dis( gen );
-    }
-
-
-    auto c = ImVec2( (vec_a.x + vec_b.x) / 2, (vec_a.y + vec_b.y) / 2 );
-    auto rotv = VecRotate( buff_v.x, buff_v.y, 90.f );
-
-    auto d = ImVec2( c.x + rf * rotv.x, c.y + rf * rotv.y );
-
-    p = FPLrec( p, d, --_r, _delta, _mean, _stand_dev, _gen_type, _s );
-
-    return FPLrec( p, vec_b, _r, _delta, _mean, _stand_dev, _gen_type, _s );
 }
-*/
+
+float get_avg( const std::vector<float> &vec ) {
+    if ( vec.empty( ) ) {
+        return 0.f;
+    }
+
+    const auto count = static_cast< float >( vec.size( ) );
+    return std::reduce( vec.begin( ), vec.end( ) ) / count;
+}
+
+float get_max( const std::vector<vec2> &points, const float &_y = 0.f ) {
+    auto ret = *std::max_element( points.begin( ), points.end( ), [ & ]( const vec2 &a, const vec2 &b ) {
+        auto a_y = std::fabsf( a.y - _y );
+        auto b_y = std::fabsf( b.y - _y );
+        return a_y < b_y;
+    } );
+
+    return std::fabsf( ret.y - _y );
+}
+
+float get_mean( const std::vector<vec2> &points, const float &_y = 0.f ) {
+    float sum = 0.f;
+    for ( const auto &p : points ) {
+        sum += std::fabsf( p.y - _y );
+    }
+
+    auto ret = sum / points.size( );
+    return ret;
+}
+
+float get_elong( const std::vector<vec2> &points ) {
+    float sum = 0.f;
+    for ( size_t i = 0; i < points.size( ) - 1; ++i ) {
+        auto vec = points[ i ] - points[ i + 1 ];
+        sum += vec.length( );
+    }
+
+    auto vec_ab = points[ 0 ] - points.back();
+    auto vec_ab_len = vec_ab.length( );
+
+    auto ret = sum / vec_ab_len;
+    return ret;
+}
+
+std::tuple<float, float, float> do_stat( const std::vector<vec2> &src_points, const std::vector<vec2> &fpl_points ) {
+    // Doing statistics only for line segment
+    if ( src_points.size( ) != 2 ) {
+        return std::make_tuple( 0.f, 0.f, 0.f );
+    }
+
+    // Check if we have any FPL's
+    if ( fpl_points.empty( ) ) {
+        return std::make_tuple( 0.f, 0.f, 0.f );
+    }
+
+    // Current y = (a.y - b.y) / 2
+    auto y = ( src_points[ 0 ].y + src_points[ 1 ].y ) / 2;
+    
+    // Getting max dev
+    auto max_dev = get_max( fpl_points, y );
+
+    // Getting mean dev
+    auto mean_dev = get_mean( fpl_points, y );
+
+    // Getting elongation factor
+    auto elong_fact = get_elong( fpl_points );
+
+    return std::make_tuple( max_dev, mean_dev, elong_fact );
+}
 
 float get_rf( float stddev, float s ) {
     std::random_device rd {};
@@ -144,24 +210,8 @@ std::vector<vec2> FPLrec( std::vector<vec2> list_a, vec2 point_b, int r, int del
     return FPLrec( list_a, vec_b, r, delta, stddev, s );
 }
 
-void do_fpl( ) {
-    // Doing FPL only if we have start points
-    if ( globals::g_points.size() < 2 ) {
-        return;
-    }
-
-    // Clear prev stuff
-    if ( !globals::g_fpl.empty( ) ) {
-        globals::g_fpl.clear( );
-    }
-
-    float stddev = vars::normal::v_stddev;
-    float s = vars::uniform::v_j * vars::uniform::v_sj;
-
-    int r = vars::v_recurs;
-    int delta = vars::v_delta;
-
-    std::vector<vec2> temp_fpl;
+std::vector<vec2> do_fpl( int r, int delta, float stddev, float s ) {
+    std::vector<vec2> fpl;
 
     // Main loop (proc 2 points - i and i + 1)
     for ( size_t i = 0; i < globals::g_points.size( ); i += 2 ) {
@@ -176,12 +226,12 @@ void do_fpl( ) {
         for ( size_t n = 0; n < fpl_points.size( ); ++n ) {
             // It's a last coord (point b)
             if ( n + 1 >= fpl_points.size( ) ) {
-                globals::g_fpl.push_back( fpl_points[ n ] );
+                fpl.push_back( fpl_points[ n ] );
                 break;
             }
 
             // If we have the same coords: src(x,y) = dst(x,y) -> skip
-            if ( !globals::g_fpl.empty() && globals::g_fpl.back() == fpl_points[ n ] ) {
+            if ( !fpl.empty() && fpl.back() == fpl_points[ n ] ) {
                 continue;
             }
 
@@ -200,15 +250,218 @@ void do_fpl( ) {
                 }
             }
 
-            globals::g_fpl.push_back( fpl_points[ n ] );
+            fpl.push_back( fpl_points[ n ] );
         }
 
         // Clear buffer
         Lp.clear( );
     }
 
-    // Clear temp buffer
-    temp_fpl.clear( );
+    return fpl;
+}
+
+void get_stats( int r, int delta, float stddev, float s ) {
+    // Doing charts stuff
+    // Uniform div
+    if ( vars::v_gen_type == 1 ) {
+        // From sj to sj * j to charts 1, 2
+        for ( int j = 1; j <= vars::uniform::v_j; ++j ) {
+            float sj = vars::uniform::v_sj * j;
+
+            std::vector<float> tmp_max;
+            std::vector<float> tmp_mean;
+            std::vector<float> tmp_elong;
+
+            // Makes N's FPL's
+            for ( int i = 0; i < vars::v_n; ++i ) {
+                auto fpls = do_fpl( r, delta, stddev, sj );
+
+                // Calc stats
+                float t_max = 0.f, t_mean = 0.f, t_elong = 0.f;
+                std::tie( t_max, t_mean, t_elong ) = do_stat( globals::g_points, fpls );
+
+                // Failed to get stats
+                if ( t_max == 0.f && t_mean == 0.f && t_elong == 0.f ) {
+                    std::cout << "[error] stats = 0! Line: " << __LINE__ << std::endl;
+                    return;
+                }
+
+                tmp_max.push_back( t_max );
+                tmp_mean.push_back( t_mean );
+                tmp_elong.push_back( t_elong );
+            }
+
+            float avg_max = get_avg( tmp_max );
+            float avg_mean = get_avg( tmp_mean );
+            float avg_elong = get_avg( tmp_elong );
+
+            plots::pl_max.push_back( avg_max );
+            plots::pl_mean.push_back( avg_mean );
+            plots::pl_elong.push_back( avg_elong );
+
+            plots::pl_x.push_back( sj );
+        }
+
+        // From 1 to r for chart 3
+        for ( int i = 1; i <= r; ++i ) {
+            int ri = i;
+
+            std::vector<float> tmp_log2elong;
+
+            // Makes N's FPL's
+            for ( int i = 0; i < vars::v_n; ++i ) {
+                auto fpls = do_fpl( ri, delta, stddev, s );
+
+                // Calc stats
+                float t_max = 0.f, t_mean = 0.f, t_elong = 0.f;
+                std::tie( t_max, t_mean, t_elong ) = do_stat( globals::g_points, fpls );
+
+                // Failed to get stats
+                if ( t_max == 0.f && t_mean == 0.f && t_elong == 0.f ) {
+                    std::cout << "[error] stats = 0! Line: " << __LINE__ << std::endl;
+                    return;
+                }
+
+                tmp_log2elong.push_back( std::log2f( t_elong ) );
+            }
+
+            float avg_log2elong = get_avg( tmp_log2elong );
+
+            plots::pl3_log2elong.push_back( avg_log2elong );
+
+            plots::pl3_x.push_back( ri );
+        }
+
+        // Updating plots arrays
+        for ( size_t i = 0; i < plots::pl_x.size( ); ++i ) {
+            plots::ar_x[ i ] = plots::pl_x[ i ];
+            plots::ar_max[ i ] = plots::pl_max[ i ];
+            plots::ar_mean[ i ] = plots::pl_mean[ i ];
+            plots::ar_elong[ i ] = plots::pl_elong[ i ];
+            plots::ar_log2elong[ i ] = std::log2f( plots::pl_elong[ i ] );
+        }
+
+        for ( size_t i = 0; i < plots::pl3_x.size( ); ++i ) {
+            plots::ar3_x[ i ] = static_cast< int >( plots::pl3_x[ i ] );
+            plots::ar3_log2elong[ i ] = plots::pl3_log2elong[ i ];
+        }
+    }
+    else if ( vars::v_gen_type == 0 ) {
+        // From 0 to stddev with step 0.01 | For chart 1, 2
+        for ( float i = 0.01f; i <= vars::normal::v_stddev; i += 0.01f ) {
+            float stddevi = i;
+
+            std::vector<float> tmp_max;
+            std::vector<float> tmp_mean;
+            std::vector<float> tmp_elong;
+
+            // Makes N's FPL's
+            for ( int i = 0; i < vars::v_n; ++i ) {
+                auto fpls = do_fpl( r, delta, stddevi, s );
+
+                // Calc stats
+                float t_max = 0.f, t_mean = 0.f, t_elong = 0.f;
+                std::tie( t_max, t_mean, t_elong ) = do_stat( globals::g_points, fpls );
+
+                // Failed to get stats
+                if ( t_max == 0.f && t_mean == 0.f && t_elong == 0.f ) {
+                    std::cout << "[error] stats = 0! Line: " << __LINE__ << std::endl;
+                    return;
+                }
+
+                tmp_max.push_back( t_max );
+                tmp_mean.push_back( t_mean );
+                tmp_elong.push_back( t_elong );
+            }
+
+            float avg_max = get_avg( tmp_max );
+            float avg_mean = get_avg( tmp_mean );
+            float avg_elong = get_avg( tmp_elong );
+
+            plots::pl_max.push_back( avg_max );
+            plots::pl_mean.push_back( avg_mean );
+            plots::pl_elong.push_back( avg_elong );
+
+            plots::pl_x.push_back( stddevi );
+        }
+
+        // From 1 to r | Chart 3
+        for ( int i = 1; i <= r; ++i ) {
+            int ri = i;
+
+            std::vector<float> tmp_log2elong;
+
+            // Makes N's FPL's
+            for ( int i = 0; i < vars::v_n; ++i ) {
+                auto fpls = do_fpl( ri, delta, stddev, s );
+
+                // Calc stats
+                float t_max = 0.f, t_mean = 0.f, t_elong = 0.f;
+                std::tie( t_max, t_mean, t_elong ) = do_stat( globals::g_points, fpls );
+
+                // Failed to get stats
+                if ( t_max == 0.f && t_mean == 0.f && t_elong == 0.f ) {
+                    std::cout << "[error] stats = 0! Line: " << __LINE__ << std::endl;
+                    return;
+                }
+
+                tmp_log2elong.push_back( std::log2f( t_elong ) );
+            }
+
+            float avg_log2elong = get_avg( tmp_log2elong );
+
+            plots::pl3_log2elong.push_back( avg_log2elong );
+
+            plots::pl3_x.push_back( ri );
+        }
+
+        // Updating plots arrays
+        for ( size_t i = 0; i < plots::pl_x.size( ); ++i ) {
+            plots::ar_x[ i ] = plots::pl_x[ i ];
+            plots::ar_max[ i ] = plots::pl_max[ i ];
+            plots::ar_mean[ i ] = plots::pl_mean[ i ];
+            plots::ar_elong[ i ] = plots::pl_elong[ i ];
+            plots::ar_log2elong[ i ] = std::log2f( plots::pl_elong[ i ] );
+        }
+
+        for ( size_t i = 0; i < plots::pl3_x.size( ); ++i ) {
+            plots::ar3_x[ i ] = static_cast< int >( plots::pl3_x[ i ] );
+            plots::ar3_log2elong[ i ] = plots::pl3_log2elong[ i ];
+        }
+    }
+}
+
+void update_fpl( ) {
+    // Doing FPL only if we have start points
+    if ( globals::g_points.size( ) < 2 ) {
+        return;
+    }
+
+    // Clear prev stuff
+    if ( !globals::g_fpl.empty( ) ) {
+        globals::g_fpl.clear( );
+
+        clear_plots( );
+    }
+
+    // Variables for FPL
+    float stddev = vars::normal::v_stddev;
+    float s = vars::uniform::v_j * vars::uniform::v_sj;
+    int r = vars::v_recurs;
+    int delta = vars::v_delta;
+
+    // Getting FPL's
+    auto fpl_points = do_fpl( r, delta, stddev, s );
+    if ( fpl_points.empty( ) ) {
+        std::cout << "[error] fpls = 0! Line: " << __LINE__ << std::endl;
+        return;
+    }
+
+    // Filling the main array with FPL
+    globals::g_fpl = fpl_points;
+
+    // Getting stats for charts
+    get_stats( r, delta, stddev, s );
 }
 
 static void ShowMainWindow( bool *p_open ) {
@@ -239,23 +492,25 @@ static void ShowMainWindow( bool *p_open ) {
                 if ( ImGui::Button( "Clear canvas", ImVec2( bt_sz_x, bt_sz_y ) ) ) {
                     globals::g_points.clear( );
                     globals::g_fpl.clear( );
+                    clear_plots( );
                 }
 
                 ImGui::SameLine( );
 
                 if ( ImGui::Button( "Clear FPL's", ImVec2( bt_sz_x, bt_sz_y ) ) ) {
                     globals::g_fpl.clear( );
+                    clear_plots( );
                 }
 
                 if ( ImGui::Button( "Do FPL", ImVec2( bt_sz_x, bt_sz_y ) ) ) {
-                    do_fpl( );
+                    update_fpl( );
                 }
 
                 // Recursion
                 if ( ImGui::SliderInt( "R", &vars::v_recurs, 1, 10 ) ) {
                     // Update FPL only if we already drew it
                     if ( !globals::g_fpl.empty( ) ) {
-                        do_fpl( );
+                        update_fpl( );
                     }
                 }
 
@@ -263,7 +518,7 @@ static void ShowMainWindow( bool *p_open ) {
                 if ( ImGui::SliderInt( "Delta", &vars::v_delta, 1, 10 ) ) {
                     // Update FPL only if we already drew it
                     if ( !globals::g_fpl.empty( ) ) {
-                        do_fpl( );
+                        update_fpl( );
                     }
                 }
 
@@ -271,7 +526,7 @@ static void ShowMainWindow( bool *p_open ) {
                 if ( ImGui::Combo( "Generator Type", &vars::v_gen_type, "Normal\0Uniform\0\0" ) ) {
                     // Update FPL only if we already drew it
                     if ( !globals::g_fpl.empty( ) ) {
-                        do_fpl( );
+                        update_fpl( );
                     }
                 }
 
@@ -283,7 +538,7 @@ static void ShowMainWindow( bool *p_open ) {
                     if ( ImGui::SliderFloat( "Std dev", &vars::normal::v_stddev, 0.1f, 1.f ) ) {
                         // Update FPL only if we already drew it
                         if ( !globals::g_fpl.empty( ) ) {
-                            do_fpl( );
+                            update_fpl( );
                         }
                     }
                 }
@@ -294,14 +549,14 @@ static void ShowMainWindow( bool *p_open ) {
                     if ( ImGui::SliderInt( "J", &vars::uniform::v_j, 1, 50 ) ) {
                         // Update FPL only if we already drew it
                         if ( !globals::g_fpl.empty( ) ) {
-                            do_fpl( );
+                            update_fpl( );
                         }
                     }
 
                     if ( ImGui::SliderFloat( "Sj", &vars::uniform::v_sj, 0.01f, 0.1f ) ) {
                         // Update FPL only if we already drew it
                         if ( !globals::g_fpl.empty( ) ) {
-                            do_fpl( );
+                            update_fpl( );
                         }
                     }
                 }
@@ -311,10 +566,10 @@ static void ShowMainWindow( bool *p_open ) {
                 ImGui::Separator( );
 
                 // Min delta
-                if ( ImGui::SliderInt( "N", &vars::v_n, 1, 100 ) ) {
+                if ( ImGui::SliderInt( "N", &vars::v_n, 1, 50 ) ) {
                     // Update FPL only if we already drew it
                     if ( !globals::g_fpl.empty( ) ) {
-                        do_fpl( );
+                        update_fpl( );
                     }
                 }
 
@@ -326,7 +581,7 @@ static void ShowMainWindow( bool *p_open ) {
                 const ImU32 main_line_color_u32 = ImColor( 255, 255, 102, 255 );
                 const ImU32 new_line_color_u32 = ImColor( 255, 179, 102, 255 );
 
-                ImGui::Text( "Mouse Left: click to add point." );
+                ImGui::Text( "Mouse Left: click to add point" );
 
                 // Using InvisibleButton() as a convenience 1) it will advance the layout cursor and 2) allows us to use IsItemHovered()/IsItemActive()
                 ImVec2 canvas_p0 = ImGui::GetCursorScreenPos( );      // ImDrawList API uses screen coordinates!
@@ -413,12 +668,13 @@ static void ShowMainWindow( bool *p_open ) {
                 ImGui::Text( "To display charts you need to generate a FPL" );
                 ImGui::Separator( );
 
-                if ( ImGui::BeginTable( "##main_page.table", 2, ImGuiTableFlags_NoSavedSettings ) ) {
-                    // First column
+                if ( ImGui::BeginTable( "##main_page.info.table", 2, ImGuiTableFlags_NoSavedSettings ) ) {
+                    // First column -> main lines coords
                     ImGui::TableNextColumn( );
                     {
                         // Main lines coords
                         ImGui::Text( "Main lines coordinates: a(x,y) b(x,y)" );
+                        ImGui::Separator( );
                         ImGui::Text( "Count of the lines: %d", globals::g_points.size( ) / 2 );
                         if ( ImGui::BeginListBox( "##MainLinesCoords" ) ) {
                             for ( size_t i = 0; i < globals::g_points.size( ); i += 2 ) {
@@ -436,7 +692,7 @@ static void ShowMainWindow( bool *p_open ) {
                         }
                     }
 
-                    // Second column
+                    // Second column -> fpl lines coords
                     ImGui::TableNextColumn( );
                     {
                         auto fpl_size = globals::g_fpl.size( );
@@ -444,6 +700,7 @@ static void ShowMainWindow( bool *p_open ) {
 
                         // FPL lines coords
                         ImGui::Text( "FPL's coordinates: a(x,y) b(x,y)" );
+                        ImGui::Separator( );
                         ImGui::Text( "Count of the lines: %d", fpl_size );
                         if ( ImGui::BeginListBox( "##FPLCoords" ) ) {
                             for ( size_t i = 0; i < fpl_size; ++i ) {
@@ -457,6 +714,61 @@ static void ShowMainWindow( bool *p_open ) {
                             }
 
                             ImGui::EndListBox( );
+                        }
+                    }
+
+                    ImGui::EndTable( );
+                }
+
+                ImGui::Separator( );
+
+                if ( ImPlot::BeginPlot( "Line Plot 1" ) ) {
+                    ImPlot::SetupAxes( "s", "value", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit );
+
+                    ImPlot::PlotLine( "max", plots::ar_x, plots::ar_max, plots::pl_x.size( ) );
+                    ImPlot::PlotLine( "mean", plots::ar_x, plots::ar_mean, plots::pl_x.size( ) );
+                    ImPlot::PlotLine( "elong", plots::ar_x, plots::ar_elong, plots::pl_x.size( ) );
+
+                    ImPlot::EndPlot( );
+                }
+
+                if ( ImGui::BeginTable( "##main_page.info.charts.table", 2, ImGuiTableFlags_NoSavedSettings ) ) {
+                    // First column -> second chart
+                    ImGui::TableNextColumn( );
+                    {
+                        std::stringstream ss;
+                        ss << "r = " << vars::v_recurs;
+                        if ( ImPlot::BeginPlot( "Line Plot 2" ) ) {
+                            if ( vars::v_gen_type == 0 ) {
+                                ImPlot::SetupAxes( "stddev", "value", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit );
+                            }
+                            else if ( vars::v_gen_type == 1 ) {
+                                ImPlot::SetupAxes( "s", "value", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit );
+                            }
+
+                            ImPlot::PlotLine( ss.str().c_str(), plots::ar_x, plots::ar_log2elong, plots::pl_x.size( ) );
+
+                            ImPlot::EndPlot( );
+                        }
+                    }
+
+                    // Second column -> third chart
+                    ImGui::TableNextColumn( );
+                    {
+                        std::stringstream ss;
+                        if ( vars::v_gen_type == 0 ) {
+                            ss << "stddev = " << vars::normal::v_stddev;
+                        }
+                        else if ( vars::v_gen_type == 1 ) {
+                            ss << "s = " << vars::uniform::v_j * vars::uniform::v_sj;
+                        }
+
+                        if ( ImPlot::BeginPlot( "Line Plot 3" ) ) {
+                            ImPlot::SetupAxes( "r", "value", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit );
+
+                            ImPlot::PlotLine( ss.str( ).c_str( ), plots::ar3_x, plots::ar3_log2elong, plots::pl3_x.size( ) );
+
+                            ImPlot::EndPlot( );
                         }
                     }
 
